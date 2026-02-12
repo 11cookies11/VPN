@@ -83,6 +83,7 @@ sudo /opt/xray/scripts/export_links.sh
 - Run on a fresh server for best results.
 - The installer is safe to re-run and will avoid duplicate installs.
 - Logs are stored in `/opt/xray/logs/`.
+- Log rotation is configured to prevent disk overflow (daily, keep 7 days, compressed).
 
 ## License
 

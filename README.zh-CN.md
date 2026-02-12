@@ -83,6 +83,7 @@ sudo /opt/xray/scripts/export_links.sh
 - 建议在全新服务器上运行。
 - 脚本可重复执行，不会重复安装。
 - 日志目录：`/opt/xray/logs/`。
+- 已配置日志轮转，防止磁盘溢出（每日切割，保留 7 天，压缩）。
 
 ## License
 

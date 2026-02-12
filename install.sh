@@ -36,15 +36,15 @@ install_deps() {
   case "$PKG_MGR" in
     apt)
       apt-get update -y
-      apt-get install -y curl wget unzip jq uuid-runtime openssl ufw
+      apt-get install -y curl wget unzip jq uuid-runtime openssl ufw logrotate
       ;;
     dnf)
       dnf makecache -y
-      dnf install -y curl wget unzip jq util-linux openssl firewalld
+      dnf install -y curl wget unzip jq util-linux openssl firewalld logrotate
       ;;
     yum)
       yum makecache -y
-      yum install -y curl wget unzip jq util-linux openssl firewalld
+      yum install -y curl wget unzip jq util-linux openssl firewalld logrotate
       ;;
   esac
 }
@@ -304,6 +304,19 @@ EOF
   sysctl --system >/dev/null
 }
 
+configure_logrotate() {
+  cat > /etc/logrotate.d/xray <<'EOF'
+/opt/xray/logs/access.log /opt/xray/logs/error.log {
+  daily
+  rotate 7
+  compress
+  missingok
+  notifempty
+  copytruncate
+}
+EOF
+}
+
 configure_firewall() {
   if command -v ufw >/dev/null 2>&1; then
     ufw allow OpenSSH >/dev/null
@@ -459,6 +472,7 @@ write_config
 configure_server_addr
 write_systemd
 enable_bbr
+configure_logrotate
 configure_firewall
 install_scripts
 systemctl restart xray
