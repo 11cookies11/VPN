@@ -1,33 +1,90 @@
-# <PROJECT_NAME>
+# Xray 一键部署（REALITY）
 
-<SHORT_DESCRIPTION>
+面向隐私与可审计的一键部署脚本（VLESS + REALITY + xtls-rprx-vision）。
 
 语言：简体中文 | [English](README.md)
 
-## 这是什么
+## 功能
 
-这是一个“无技术栈绑定”的 GitHub 模板仓库，用来快速开始任何类型的项目（库 / 服务 / 脚本 / 文档 / 学习记录等）。
+- VLESS + REALITY + xtls-rprx-vision（TCP）
+- 多用户管理脚本
+- systemd 服务
+- 启用 BBR
+- 自动配置防火墙（UFW 或 firewalld）
+- 强随机 UUID、shortId、Reality 密钥对
+- 处理旧服务与旧配置（安全迁移）
 
-首次使用时，通常需要替换以下占位符：
+## 支持系统
 
-- `<PROJECT_NAME>`：项目名称
-- `<SHORT_DESCRIPTION>`：一句话简介
-- `LICENSE`：选择合适的许可证
-- `.github/ISSUE_TEMPLATE/*`：按需调整 Issue 模板
+- Ubuntu 22.04 / 24.04
+- Debian 11 / 12
+- Rocky / Alma 8 / 9
+- CentOS 7 / 8
 
-## 如何使用（作为模板）
+## 快速开始
 
-1. 在 GitHub 上点击 **Use this template** 创建新仓库
-2. 修改 `README.md` 与基础信息文件（如 `LICENSE`、`CONTRIBUTING.md`）
-3. 添加你的代码 / 文档
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
 
-## 仓库约定（建议）
+安装过程中会提示输入：
 
-- 变更记录：`CHANGELOG.md`（Keep a Changelog 风格）
-- 提交信息与 PR 标题：Conventional Commits（例如 `feat:`、`fix:`、`chore:`）
-- 社区文档：`CONTRIBUTING.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md`
-- Issue / PR 模板：`.github/`
+- 监听端口（默认 443）
+- Reality 伪装域名 SNI（默认 www.microsoft.com）
+- 客户端链接中使用的公网地址（IP 或域名）
 
-## 许可证
+如果检测到旧的代理服务，安装器会提示停止/禁用并可选将旧配置移动到
+`/opt/xray/backup-<timestamp>`。
+
+安装完成后会输出：
+
+- Public key
+- UUID
+- shortId
+- 可直接导入的 vless:// 链接
+
+## 管理脚本
+
+脚本会安装到服务器的 `/opt/xray/scripts/`。
+
+新增用户：
+
+```bash
+sudo /opt/xray/scripts/add_user.sh <username>
+```
+
+删除用户：
+
+```bash
+sudo /opt/xray/scripts/remove_user.sh <UUID>
+```
+
+列出用户：
+
+```bash
+sudo /opt/xray/scripts/list_users.sh
+```
+
+导出全部链接：
+
+```bash
+sudo /opt/xray/scripts/export_links.sh
+```
+
+## 文件说明
+
+- `install.sh` 主安装脚本
+- `scripts/` 管理脚本（会复制到 `/opt/xray/scripts/`）
+- `systemd/xray.service` systemd 服务模板
+
+## 说明
+
+- 建议在全新服务器上运行。
+- 脚本可重复执行，不会重复安装。
+- 日志目录：`/opt/xray/logs/`。
+- 已配置日志轮转，防止磁盘溢出（每日切割，保留 7 天，压缩）。
+
+## License
 
 见 `LICENSE`。
