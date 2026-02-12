@@ -12,6 +12,7 @@ Language: English | [简体中文](README.zh-CN.md)
 - BBR enabled
 - Firewall configured (UFW or firewalld)
 - Strong random UUID, shortId, and Reality key pair
+- Safe handling of legacy services and configs
 
 ## Supported OS
 
@@ -32,6 +33,9 @@ You will be prompted for:
 - Listen port (default 443)
 - ServerName (SNI) for Reality (default www.microsoft.com)
 - Public address for client links (IP or domain)
+
+If legacy proxy services are detected, the installer will ask to stop/disable them
+and optionally move legacy configs into `/opt/xray/backup-<timestamp>`.
 
 After install, the script prints:
 

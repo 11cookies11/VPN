@@ -78,6 +78,74 @@ ensure_dirs() {
   mkdir -p /opt/xray/config /opt/xray/keys /opt/xray/logs /opt/xray/scripts
 }
 
+list_existing_services() {
+  local candidates=(xray v2ray trojan trojan-go sing-box singbox shadowsocks-libev ssserver clash)
+  local found=()
+  local svc
+  for svc in "${candidates[@]}"; do
+    if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${svc}.service"; then
+      found+=("${svc}.service")
+    fi
+  done
+  printf "%s\n" "${found[@]}"
+}
+
+stop_disable_services() {
+  local services=("$@")
+  local svc
+  for svc in "${services[@]}"; do
+    systemctl stop "$svc" >/dev/null 2>&1 || true
+    systemctl disable "$svc" >/dev/null 2>&1 || true
+  done
+}
+
+backup_legacy_paths() {
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local backup_dir="/opt/xray/backup-${ts}"
+  local paths=(/etc/xray /etc/v2ray /usr/local/etc/xray /usr/local/etc/v2ray /opt/v2ray /opt/xray)
+  local moved=0
+
+  mkdir -p "$backup_dir"
+  local p
+  for p in "${paths[@]}"; do
+    if [ -e "$p" ] && [ "$p" != "/opt/xray" ]; then
+      mv "$p" "$backup_dir/" || true
+      moved=1
+    fi
+  done
+
+  if [ "$moved" -eq 0 ]; then
+    rmdir "$backup_dir" 2>/dev/null || true
+  fi
+}
+
+handle_legacy() {
+  local services=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && services+=("$line")
+  done < <(list_existing_services)
+
+  if [ "${#services[@]}" -gt 0 ]; then
+    echo "Detected existing proxy services:"
+    printf " - %s\n" "${services[@]}"
+    read -r -p "Stop and disable these services? (y/N): " ans
+    case "${ans:-N}" in
+      y|Y) stop_disable_services "${services[@]}" ;;
+      *) ;;
+    esac
+  fi
+
+  if [ -d /etc/xray ] || [ -d /etc/v2ray ] || [ -d /usr/local/etc/xray ] || [ -d /usr/local/etc/v2ray ] || [ -d /opt/v2ray ]; then
+    echo "Detected legacy config directories."
+    read -r -p "Move legacy configs to /opt/xray/backup-<timestamp>? (y/N): " ans
+    case "${ans:-N}" in
+      y|Y) backup_legacy_paths ;;
+      *) ;;
+    esac
+  fi
+}
+
 ask() {
   local prompt="$1"
   local default="$2"
@@ -126,6 +194,12 @@ write_config() {
 
   local port sni
   port="$(ask "Listen port" "443")"
+  if command -v ss >/dev/null 2>&1; then
+    while ss -lntp 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"; do
+      echo "Port $port is already in use."
+      port="$(ask "Listen port" "443")"
+    done
+  fi
   sni="$(ask "ServerName(SNI)" "www.microsoft.com")"
 
   echo "$port" > /opt/xray/keys/port
@@ -377,6 +451,7 @@ require_root
 detect_os
 detect_pkg_mgr
 install_deps
+handle_legacy
 ensure_dirs
 install_xray
 gen_keys

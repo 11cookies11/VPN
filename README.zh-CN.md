@@ -12,6 +12,7 @@
 - 启用 BBR
 - 自动配置防火墙（UFW 或 firewalld）
 - 强随机 UUID、shortId、Reality 密钥对
+- 处理旧服务与旧配置（安全迁移）
 
 ## 支持系统
 
@@ -32,6 +33,9 @@ sudo ./install.sh
 - 监听端口（默认 443）
 - Reality 伪装域名 SNI（默认 www.microsoft.com）
 - 客户端链接中使用的公网地址（IP 或域名）
+
+如果检测到旧的代理服务，安装器会提示停止/禁用并可选将旧配置移动到
+`/opt/xray/backup-<timestamp>`。
 
 安装完成后会输出：
 
