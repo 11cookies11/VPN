@@ -1,0 +1,14 @@
+﻿[Unit]
+Description=Xray Service
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray run -config /opt/xray/config/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
