@@ -1,33 +1,84 @@
-# <PROJECT_NAME>
+# Xray One-Key (REALITY)
 
-<SHORT_DESCRIPTION>
+Privacy-first, auditable deployment scripts for Xray (VLESS + REALITY + xtls-rprx-vision).
 
 Language: English | [简体中文](README.zh-CN.md)
 
-## Overview
+## Features
 
-This is a tech-agnostic GitHub template repository for quickly bootstrapping
-any kind of project (library / service / scripts / docs / learning notes).
+- VLESS + REALITY + xtls-rprx-vision on TCP
+- Multi-user management scripts
+- Systemd service unit
+- BBR enabled
+- Firewall configured (UFW or firewalld)
+- Strong random UUID, shortId, and Reality key pair
 
-On first use, replace these placeholders:
+## Supported OS
 
-- `<PROJECT_NAME>`: project name
-- `<SHORT_DESCRIPTION>`: one-line description
-- `LICENSE`: choose a license that fits your project
-- `.github/ISSUE_TEMPLATE/*`: adjust issue templates to your needs
+- Ubuntu 22.04 / 24.04
+- Debian 11 / 12
+- Rocky / Alma 8 / 9
+- CentOS 7 / 8
 
-## Getting started (as a template)
+## Quick Start
 
-1. Click **Use this template** on GitHub to create a new repository
-2. Update `README.md` and other basics (e.g. `LICENSE`, `CONTRIBUTING.md`)
-3. Add your code / docs
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
 
-## Conventions (recommended)
+You will be prompted for:
 
-- Changelog: `CHANGELOG.md` (Keep a Changelog style)
-- Commit messages & PR titles: Conventional Commits (e.g. `feat:`, `fix:`, `chore:`)
-- Community docs: `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`
-- Issue / PR templates: `.github/`
+- Listen port (default 443)
+- ServerName (SNI) for Reality (default www.microsoft.com)
+- Public address for client links (IP or domain)
+
+After install, the script prints:
+
+- Public key
+- UUID
+- shortId
+- A ready-to-import vless:// link
+
+## Management Scripts
+
+Scripts are installed into `/opt/xray/scripts/` on the server.
+
+Add user:
+
+```bash
+sudo /opt/xray/scripts/add_user.sh <username>
+```
+
+Remove user:
+
+```bash
+sudo /opt/xray/scripts/remove_user.sh <UUID>
+```
+
+List users:
+
+```bash
+sudo /opt/xray/scripts/list_users.sh
+```
+
+Export links:
+
+```bash
+sudo /opt/xray/scripts/export_links.sh
+```
+
+## Files
+
+- `install.sh` main installer
+- `scripts/` management scripts (copied into `/opt/xray/scripts/`)
+- `systemd/xray.service` systemd unit template
+
+## Notes
+
+- Run on a fresh server for best results.
+- The installer is safe to re-run and will avoid duplicate installs.
+- Logs are stored in `/opt/xray/logs/`.
 
 ## License
 
