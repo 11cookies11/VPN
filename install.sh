@@ -50,7 +50,7 @@ install_deps() {
 }
 
 install_xray() {
-  if command -v xray >/dev/null 2>&1; then
+  if command -v xray >/dev/null 2>&1 && xray x25519 >/dev/null 2>&1; then
     return 0
   fi
   local url
@@ -161,11 +161,14 @@ ask() {
 gen_keys() {
   if [ ! -f /opt/xray/keys/private.key ] || [ ! -f /opt/xray/keys/public.key ]; then
     local out priv pub
-    out="$(/usr/local/bin/xray x25519)"
-    priv="$(printf "%s\n" "$out" | awk -F': ' '/Private key/ {print $2}')"
-    pub="$(printf "%s\n" "$out" | awk -F': ' '/Public key/ {print $2}')"
+    out="$(/usr/local/bin/xray x25519 2>&1 || true)"
+    out="$(printf "%s\n" "$out" | tr -d '\r')"
+    priv="$(printf "%s\n" "$out" | awk -F':' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
+    pub="$(printf "%s\n" "$out" | awk -F':' 'tolower($0) ~ /public[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
     if [ -z "$priv" ] || [ -z "$pub" ]; then
       echo "Failed to generate X25519 keys" >&2
+      echo "xray x25519 output:" >&2
+      printf "%s\n" "$out" >&2
       exit 1
     fi
     printf "%s" "$priv" > /opt/xray/keys/private.key
