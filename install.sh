@@ -164,7 +164,7 @@ gen_keys() {
     out="$(/usr/local/bin/xray x25519 2>&1 || true)"
     out="$(printf "%s\n" "$out" | tr -d '\r')"
     priv="$(printf "%s\n" "$out" | awk -F':' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
-    pub="$(printf "%s\n" "$out" | awk -F':' 'tolower($0) ~ /public[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
+    pub="$(printf "%s\n" "$out" | awk -F':' 'tolower($1) ~ /public[[:space:]]*key/ || tolower($1) ~ /password/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
     if [ -z "$priv" ] || [ -z "$pub" ]; then
       echo "Failed to generate X25519 keys" >&2
       echo "xray x25519 output:" >&2
