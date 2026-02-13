@@ -50,15 +50,17 @@ install_deps() {
 }
 
 install_xray() {
-  if command -v xray >/dev/null 2>&1 && xray x25519 >/dev/null 2>&1; then
+  if command -v xray >/dev/null 2>&1; then
     return 0
   fi
+
   local url
   url="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.assets[] | select(.name|test("linux-64.zip$")) | .browser_download_url' | head -n1)"
   if [ -z "$url" ] || [ "$url" = "null" ]; then
     echo "Failed to fetch Xray release URL" >&2
     exit 1
   fi
+
   rm -rf /tmp/xray-install
   mkdir -p /tmp/xray-install
   wget -O /tmp/xray-install/xray.zip "$url"
@@ -158,8 +160,37 @@ ask() {
   fi
 }
 
-gen_keys() {
+ask_protocol() {
+  local choice
+  echo "Select deployment mode:"
+  echo "  1) VLESS + REALITY (TCP)"
+  echo "  2) VMess + WS + TLS"
+
+  while true; do
+    read -r -p "Mode [1]: " choice
+    case "${choice:-1}" in
+      1)
+        PROTOCOL="vless-reality"
+        break
+        ;;
+      2)
+        PROTOCOL="vmess-ws-tls"
+        break
+        ;;
+      *)
+        echo "Invalid option, choose 1 or 2."
+        ;;
+    esac
+  done
+}
+
+gen_reality_keys() {
   if [ ! -f /opt/xray/keys/private.key ] || [ ! -f /opt/xray/keys/public.key ]; then
+    if ! /usr/local/bin/xray x25519 >/dev/null 2>&1; then
+      echo "This Xray build does not support x25519 (required by REALITY)." >&2
+      exit 1
+    fi
+
     local out priv pub
     out="$(/usr/local/bin/xray x25519 2>&1 || true)"
     out="$(printf "%s\n" "$out" | tr -d '\r')"
@@ -175,42 +206,47 @@ gen_keys() {
     printf "%s" "$pub" > /opt/xray/keys/public.key
   fi
 
-  if [ ! -f /opt/xray/keys/uuid ]; then
-    uuidgen > /opt/xray/keys/uuid
-  fi
-
   if [ ! -f /opt/xray/keys/shortid ]; then
     openssl rand -hex 4 > /opt/xray/keys/shortid
   fi
 }
 
-write_config() {
-  local cfg=/opt/xray/config/config.json
-
-  if [ -f "$cfg" ]; then
-    read -r -p "Config exists. Overwrite? (y/N): " ans
-    case "${ans:-N}" in
-      y|Y) ;;
-      *) return 0 ;;
-    esac
+ensure_uuid() {
+  if [ ! -f /opt/xray/keys/uuid ]; then
+    uuidgen > /opt/xray/keys/uuid
   fi
+}
 
-  local port sni
-  port="$(ask "Listen port" "443")"
-  if command -v ss >/dev/null 2>&1; then
-    while ss -lntp 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"; do
-      echo "Port $port is already in use."
-      port="$(ask "Listen port" "443")"
-    done
-  fi
-  sni="$(ask "ServerName(SNI)" "www.microsoft.com")"
+generate_self_signed_cert() {
+  local sni="$1"
+  local cert_file="$2"
+  local key_file="$3"
+  local cert_dir key_dir
 
+  cert_dir="$(dirname "$cert_file")"
+  key_dir="$(dirname "$key_file")"
+  mkdir -p "$cert_dir" "$key_dir"
+
+  openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+    -subj "/CN=${sni}" \
+    -keyout "$key_file" \
+    -out "$cert_file" >/dev/null 2>&1
+}
+
+write_vless_reality_config() {
+  local cfg="$1"
+  local port="$2"
+  local sni="$3"
+
+  echo "$PROTOCOL" > /opt/xray/keys/protocol
   echo "$port" > /opt/xray/keys/port
   echo "$sni" > /opt/xray/keys/server_name
 
-  local priv pub uuid shortid
+  gen_reality_keys
+  ensure_uuid
+
+  local priv uuid shortid
   priv="$(cat /opt/xray/keys/private.key)"
-  pub="$(cat /opt/xray/keys/public.key)"
   uuid="$(cat /opt/xray/keys/uuid)"
   shortid="$(cat /opt/xray/keys/shortid)"
 
@@ -265,6 +301,132 @@ write_config() {
   ]
 }
 EOF
+}
+
+write_vmess_ws_tls_config() {
+  local cfg="$1"
+  local port="$2"
+  local sni="$3"
+  local ws_path="$4"
+
+  ensure_uuid
+
+  local cert_file key_file
+  cert_file="$(ask "TLS certificate file" "/opt/xray/keys/fullchain.pem")"
+  key_file="$(ask "TLS private key file" "/opt/xray/keys/privkey.pem")"
+
+  if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+    read -r -p "TLS files not found. Generate self-signed cert now? (Y/n): " gen_ans
+    case "${gen_ans:-Y}" in
+      n|N)
+        echo "VMess+WS+TLS requires certificate and key files." >&2
+        exit 1
+        ;;
+      *)
+        generate_self_signed_cert "$sni" "$cert_file" "$key_file"
+        ;;
+    esac
+  fi
+
+  echo "$PROTOCOL" > /opt/xray/keys/protocol
+  echo "$port" > /opt/xray/keys/port
+  echo "$sni" > /opt/xray/keys/server_name
+  echo "$ws_path" > /opt/xray/keys/ws_path
+  echo "$cert_file" > /opt/xray/keys/tls_cert
+  echo "$key_file" > /opt/xray/keys/tls_key
+
+  local uuid
+  uuid="$(cat /opt/xray/keys/uuid)"
+
+  cat > "$cfg" <<EOF
+{
+  "log": {
+    "access": "/opt/xray/logs/access.log",
+    "error": "/opt/xray/logs/error.log",
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vmess-in",
+      "listen": "0.0.0.0",
+      "port": $port,
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "alterId": 0,
+            "email": "default"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "$cert_file",
+              "keyFile": "$key_file"
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "$ws_path",
+          "headers": {
+            "Host": "$sni"
+          }
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+}
+
+write_config() {
+  local cfg=/opt/xray/config/config.json
+
+  if [ -f "$cfg" ]; then
+    read -r -p "Config exists. Overwrite? (y/N): " ans
+    case "${ans:-N}" in
+      y|Y) ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  ask_protocol
+
+  local port sni
+  port="$(ask "Listen port" "443")"
+  if command -v ss >/dev/null 2>&1; then
+    while ss -lntp 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"; do
+      echo "Port $port is already in use."
+      port="$(ask "Listen port" "443")"
+    done
+  fi
+  sni="$(ask "ServerName(SNI)" "www.microsoft.com")"
+
+  case "$PROTOCOL" in
+    vless-reality)
+      write_vless_reality_config "$cfg" "$port" "$sni"
+      ;;
+    vmess-ws-tls)
+      local ws_path
+      ws_path="$(ask "WebSocket path" "/ws")"
+      write_vmess_ws_tls_config "$cfg" "$port" "$sni" "$ws_path"
+      ;;
+    *)
+      echo "Unsupported protocol: $PROTOCOL" >&2
+      exit 1
+      ;;
+  esac
 
   jq -e . "$cfg" >/dev/null
 }
@@ -352,20 +514,32 @@ fi
 
 username="$1"
 config="/opt/xray/config/config.json"
+protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
 tmp="$(mktemp)"
 uuid="$(uuidgen)"
 
-jq --arg id "$uuid" --arg email "$username" \
-  '.inbounds[0].settings.clients += [{"id":$id,"flow":"xtls-rprx-vision","email":$email}]' \
-  "$config" > "$tmp"
+case "$protocol" in
+  vless-reality)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"flow":"xtls-rprx-vision","email":$email}]' \
+      "$config" > "$tmp"
+    ;;
+  vmess-ws-tls)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"alterId":0,"email":$email}]' \
+      "$config" > "$tmp"
+    ;;
+  *)
+    echo "Unsupported protocol: $protocol" >&2
+    exit 1
+    ;;
+esac
 
 jq -e . "$tmp" >/dev/null
 mv "$tmp" "$config"
 
 systemctl restart xray
 
-pub="$(cat /opt/xray/keys/public.key)"
-shortid="$(cat /opt/xray/keys/shortid)"
 sni="$(cat /opt/xray/keys/server_name)"
 port="$(cat /opt/xray/keys/port)"
 addr="$(cat /opt/xray/keys/server_addr)"
@@ -373,7 +547,26 @@ if [ -z "$addr" ]; then
   addr="YOUR_SERVER_IP"
 fi
 
-echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
+case "$protocol" in
+  vless-reality)
+    pub="$(cat /opt/xray/keys/public.key)"
+    shortid="$(cat /opt/xray/keys/shortid)"
+    echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
+    ;;
+  vmess-ws-tls)
+    ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+    vmess_json="$(jq -nc \
+      --arg ps "$username" \
+      --arg add "$addr" \
+      --arg port "$port" \
+      --arg id "$uuid" \
+      --arg host "$sni" \
+      --arg path "$ws_path" \
+      --arg sni "$sni" \
+      '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+    echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+    ;;
+esac
 EOF
 
   cat > /opt/xray/scripts/remove_user.sh <<'EOF'
@@ -425,8 +618,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-pub="$(cat /opt/xray/keys/public.key)"
-shortid="$(cat /opt/xray/keys/shortid)"
+protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
 sni="$(cat /opt/xray/keys/server_name)"
 port="$(cat /opt/xray/keys/port)"
 addr="$(cat /opt/xray/keys/server_addr)"
@@ -435,7 +627,26 @@ if [ -z "$addr" ]; then
 fi
 
 jq -r '.inbounds[0].settings.clients[] | "\(.email)\t\(.id)"' /opt/xray/config/config.json | while IFS=$'\t' read -r email uuid; do
-  echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${email}"
+  case "$protocol" in
+    vless-reality)
+      pub="$(cat /opt/xray/keys/public.key)"
+      shortid="$(cat /opt/xray/keys/shortid)"
+      echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${email}"
+      ;;
+    vmess-ws-tls)
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      vmess_json="$(jq -nc \
+        --arg ps "$email" \
+        --arg add "$addr" \
+        --arg port "$port" \
+        --arg id "$uuid" \
+        --arg host "$sni" \
+        --arg path "$ws_path" \
+        --arg sni "$sni" \
+        '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+      echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+      ;;
+  esac
 done
 EOF
 
@@ -446,10 +657,9 @@ EOF
 }
 
 print_output() {
-  local pub uuid shortid addr sni port
-  pub="$(cat /opt/xray/keys/public.key)"
+  local protocol uuid addr sni port
+  protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
   uuid="$(cat /opt/xray/keys/uuid)"
-  shortid="$(cat /opt/xray/keys/shortid)"
   sni="$(cat /opt/xray/keys/server_name)"
   port="$(cat /opt/xray/keys/port)"
   addr="$(cat /opt/xray/keys/server_addr)"
@@ -457,10 +667,33 @@ print_output() {
     addr="YOUR_SERVER_IP"
   fi
 
-  echo "PublicKey: $pub"
+  echo "Protocol: $protocol"
   echo "UUID: $uuid"
-  echo "shortId: $shortid"
-  echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#default"
+
+  case "$protocol" in
+    vless-reality)
+      local pub shortid
+      pub="$(cat /opt/xray/keys/public.key)"
+      shortid="$(cat /opt/xray/keys/shortid)"
+      echo "PublicKey: $pub"
+      echo "shortId: $shortid"
+      echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#default"
+      ;;
+    vmess-ws-tls)
+      local ws_path vmess_json
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      vmess_json="$(jq -nc \
+        --arg ps "default" \
+        --arg add "$addr" \
+        --arg port "$port" \
+        --arg id "$uuid" \
+        --arg host "$sni" \
+        --arg path "$ws_path" \
+        --arg sni "$sni" \
+        '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+      echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+      ;;
+  esac
 }
 
 require_root
@@ -470,7 +703,6 @@ install_deps
 handle_legacy
 ensure_dirs
 install_xray
-gen_keys
 write_config
 configure_server_addr
 write_systemd

@@ -13,20 +13,32 @@ fi
 
 username="$1"
 config="/opt/xray/config/config.json"
+protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
 tmp="$(mktemp)"
 uuid="$(uuidgen)"
 
-jq --arg id "$uuid" --arg email "$username" \
-  '.inbounds[0].settings.clients += [{"id":$id,"flow":"xtls-rprx-vision","email":$email}]' \
-  "$config" > "$tmp"
+case "$protocol" in
+  vless-reality)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"flow":"xtls-rprx-vision","email":$email}]' \
+      "$config" > "$tmp"
+    ;;
+  vmess-ws-tls)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"alterId":0,"email":$email}]' \
+      "$config" > "$tmp"
+    ;;
+  *)
+    echo "Unsupported protocol: $protocol" >&2
+    exit 1
+    ;;
+esac
 
 jq -e . "$tmp" >/dev/null
 mv "$tmp" "$config"
 
 systemctl restart xray
 
-pub="$(cat /opt/xray/keys/public.key)"
-shortid="$(cat /opt/xray/keys/shortid)"
 sni="$(cat /opt/xray/keys/server_name)"
 port="$(cat /opt/xray/keys/port)"
 addr="$(cat /opt/xray/keys/server_addr)"
@@ -34,4 +46,23 @@ if [ -z "$addr" ]; then
   addr="YOUR_SERVER_IP"
 fi
 
-echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
+case "$protocol" in
+  vless-reality)
+    pub="$(cat /opt/xray/keys/public.key)"
+    shortid="$(cat /opt/xray/keys/shortid)"
+    echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
+    ;;
+  vmess-ws-tls)
+    ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+    vmess_json="$(jq -nc \
+      --arg ps "$username" \
+      --arg add "$addr" \
+      --arg port "$port" \
+      --arg id "$uuid" \
+      --arg host "$sni" \
+      --arg path "$ws_path" \
+      --arg sni "$sni" \
+      '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+    echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+    ;;
+esac
