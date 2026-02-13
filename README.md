@@ -9,6 +9,7 @@ Language: English | [Chinese (Simplified)](README.zh-CN.md)
 - Selectable deployment mode:
   - `VLESS + REALITY + xtls-rprx-vision` (TCP)
   - `VMess + WS + TLS`
+  - `VMess + WS behind Nginx` (Xray no TLS, client TLS on Nginx)
 - Multi-user management scripts
 - Systemd service unit
 - BBR enabled
@@ -42,6 +43,13 @@ Additional prompts for `VMess + WS + TLS`:
 - TLS certificate file path
 - TLS private key file path
 - If cert/key are missing, installer can generate a self-signed cert
+
+Additional prompts for `VMess + WS behind Nginx`:
+
+- Backend listen port on Xray (for example `10000`)
+- WebSocket path (default `/ws`)
+- Client entry port on Nginx for link export (default `443`)
+- Optional: auto update/create Nginx server config and reload Nginx
 
 After install, the script prints a ready-to-import link (`vless://` or `vmess://` depending on mode).
 

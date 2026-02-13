@@ -165,6 +165,7 @@ ask_protocol() {
   echo "Select deployment mode:"
   echo "  1) VLESS + REALITY (TCP)"
   echo "  2) VMess + WS + TLS"
+  echo "  3) VMess + WS behind Nginx (no TLS on Xray, client TLS on 443)"
 
   while true; do
     read -r -p "Mode [1]: " choice
@@ -177,8 +178,12 @@ ask_protocol() {
         PROTOCOL="vmess-ws-tls"
         break
         ;;
+      3)
+        PROTOCOL="vmess-ws-nginx"
+        break
+        ;;
       *)
-        echo "Invalid option, choose 1 or 2."
+        echo "Invalid option, choose 1, 2 or 3."
         ;;
     esac
   done
@@ -330,6 +335,7 @@ write_vmess_ws_tls_config() {
 
   echo "$PROTOCOL" > /opt/xray/keys/protocol
   echo "$port" > /opt/xray/keys/port
+  echo "$port" > /opt/xray/keys/client_port
   echo "$sni" > /opt/xray/keys/server_name
   echo "$ws_path" > /opt/xray/keys/ws_path
   echo "$cert_file" > /opt/xray/keys/tls_cert
@@ -390,6 +396,69 @@ write_vmess_ws_tls_config() {
 EOF
 }
 
+write_vmess_ws_nginx_config() {
+  local cfg="$1"
+  local backend_port="$2"
+  local sni="$3"
+  local ws_path="$4"
+  local client_port
+
+  ensure_uuid
+  client_port="$(ask "Client entry port on Nginx (for link export)" "443")"
+
+  echo "$PROTOCOL" > /opt/xray/keys/protocol
+  echo "$backend_port" > /opt/xray/keys/port
+  echo "$client_port" > /opt/xray/keys/client_port
+  echo "$sni" > /opt/xray/keys/server_name
+  echo "$ws_path" > /opt/xray/keys/ws_path
+
+  local uuid
+  uuid="$(cat /opt/xray/keys/uuid)"
+
+  cat > "$cfg" <<EOF
+{
+  "log": {
+    "access": "/opt/xray/logs/access.log",
+    "error": "/opt/xray/logs/error.log",
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vmess-in-nginx",
+      "listen": "127.0.0.1",
+      "port": $backend_port,
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "alterId": 0,
+            "email": "default"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "$ws_path",
+          "headers": {
+            "Host": "$sni"
+          }
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+}
+
 write_config() {
   local cfg=/opt/xray/config/config.json
 
@@ -421,6 +490,11 @@ write_config() {
       local ws_path
       ws_path="$(ask "WebSocket path" "/ws")"
       write_vmess_ws_tls_config "$cfg" "$port" "$sni" "$ws_path"
+      ;;
+    vmess-ws-nginx)
+      local ws_path
+      ws_path="$(ask "WebSocket path" "/ws")"
+      write_vmess_ws_nginx_config "$cfg" "$port" "$sni" "$ws_path"
       ;;
     *)
       echo "Unsupported protocol: $PROTOCOL" >&2
@@ -483,17 +557,127 @@ EOF
 }
 
 configure_firewall() {
+  local protocol fw_port
+  protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
+  fw_port="$(cat /opt/xray/keys/port)"
+  if [ "$protocol" = "vmess-ws-nginx" ]; then
+    fw_port="$(cat /opt/xray/keys/client_port 2>/dev/null || echo "443")"
+  fi
+
   if command -v ufw >/dev/null 2>&1; then
     ufw allow OpenSSH >/dev/null
-    ufw allow "$(cat /opt/xray/keys/port)/tcp" >/dev/null
+    ufw allow "${fw_port}/tcp" >/dev/null
     ufw default deny incoming >/dev/null
     ufw --force enable >/dev/null
   elif command -v firewall-cmd >/dev/null 2>&1; then
     systemctl enable --now firewalld >/dev/null 2>&1 || true
     firewall-cmd --permanent --add-service=ssh >/dev/null
-    firewall-cmd --permanent --add-port="$(cat /opt/xray/keys/port)/tcp" >/dev/null
+    firewall-cmd --permanent --add-port="${fw_port}/tcp" >/dev/null
     firewall-cmd --permanent --set-default-zone=public >/dev/null
     firewall-cmd --reload >/dev/null
+  fi
+}
+
+configure_nginx_for_vmess_ws_nginx() {
+  local protocol
+  protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
+  if [ "$protocol" != "vmess-ws-nginx" ]; then
+    return 0
+  fi
+
+  if ! command -v nginx >/dev/null 2>&1; then
+    echo "Nginx not found, skip auto nginx config."
+    return 0
+  fi
+
+  read -r -p "Auto configure Nginx reverse proxy now? (Y/n): " ans
+  case "${ans:-Y}" in
+    n|N) return 0 ;;
+    *) ;;
+  esac
+
+  local sni ws_path backend_port client_port
+  sni="$(cat /opt/xray/keys/server_name)"
+  ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+  backend_port="$(cat /opt/xray/keys/port)"
+  client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || echo "443")"
+
+  local conf_file
+  conf_file="$(ask "Nginx server config file to update" "/etc/nginx/conf.d/${sni}.conf")"
+
+  local block
+  block="$(cat <<EOF
+# BEGIN XRAY_WS_PROXY
+location ${ws_path} {
+    proxy_pass http://127.0.0.1:${backend_port};
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_read_timeout 3600;
+}
+# END XRAY_WS_PROXY
+EOF
+)"
+
+  if [ -f "$conf_file" ]; then
+    local tmp
+    tmp="$(mktemp)"
+
+    # Remove previous managed block before re-inserting.
+    awk '
+      /# BEGIN XRAY_WS_PROXY/ {skip=1; next}
+      /# END XRAY_WS_PROXY/ {skip=0; next}
+      !skip {print}
+    ' "$conf_file" > "$tmp"
+    mv "$tmp" "$conf_file"
+
+    tmp="$(mktemp)"
+    awk -v block="$block" '
+      { lines[NR]=$0 }
+      END {
+        inserted=0
+        for (i=1; i<=NR; i++) {
+          if (!inserted && lines[i] ~ /^[[:space:]]*}[[:space:]]*$/) {
+            print block
+            inserted=1
+          }
+          print lines[i]
+        }
+        if (!inserted) {
+          print block
+        }
+      }
+    ' "$conf_file" > "$tmp"
+    mv "$tmp" "$conf_file"
+  else
+    local cert_file key_file
+    cert_file="$(ask "Nginx TLS cert path" "/etc/nginx/ssl/cf.crt")"
+    key_file="$(ask "Nginx TLS key path" "/etc/nginx/ssl/cf.key")"
+    mkdir -p "$(dirname "$conf_file")"
+    cat > "$conf_file" <<EOF
+server {
+    listen ${client_port} ssl http2;
+    server_name ${sni};
+
+    ssl_certificate ${cert_file};
+    ssl_certificate_key ${key_file};
+
+    location / {
+        return 200 "OK";
+    }
+
+${block}
+}
+EOF
+  fi
+
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx
+    echo "Nginx config applied: ${conf_file}"
+  else
+    echo "Nginx config test failed. Please check: ${conf_file}" >&2
+    return 1
   fi
 }
 
@@ -529,6 +713,11 @@ case "$protocol" in
       '.inbounds[0].settings.clients += [{"id":$id,"alterId":0,"email":$email}]' \
       "$config" > "$tmp"
     ;;
+  vmess-ws-nginx)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"alterId":0,"email":$email}]' \
+      "$config" > "$tmp"
+    ;;
   *)
     echo "Unsupported protocol: $protocol" >&2
     exit 1
@@ -554,11 +743,26 @@ case "$protocol" in
     echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
     ;;
   vmess-ws-tls)
+    client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
     ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
     vmess_json="$(jq -nc \
       --arg ps "$username" \
       --arg add "$addr" \
-      --arg port "$port" \
+      --arg port "$client_port" \
+      --arg id "$uuid" \
+      --arg host "$sni" \
+      --arg path "$ws_path" \
+      --arg sni "$sni" \
+      '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+    echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+    ;;
+  vmess-ws-nginx)
+    client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || echo "443")"
+    ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+    vmess_json="$(jq -nc \
+      --arg ps "$username" \
+      --arg add "$addr" \
+      --arg port "$client_port" \
       --arg id "$uuid" \
       --arg host "$sni" \
       --arg path "$ws_path" \
@@ -634,11 +838,26 @@ jq -r '.inbounds[0].settings.clients[] | "\(.email)\t\(.id)"' /opt/xray/config/c
       echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${email}"
       ;;
     vmess-ws-tls)
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
       ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
       vmess_json="$(jq -nc \
         --arg ps "$email" \
         --arg add "$addr" \
-        --arg port "$port" \
+        --arg port "$client_port" \
+        --arg id "$uuid" \
+        --arg host "$sni" \
+        --arg path "$ws_path" \
+        --arg sni "$sni" \
+        '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+      echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+      ;;
+    vmess-ws-nginx)
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || echo "443")"
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      vmess_json="$(jq -nc \
+        --arg ps "$email" \
+        --arg add "$addr" \
+        --arg port "$client_port" \
         --arg id "$uuid" \
         --arg host "$sni" \
         --arg path "$ws_path" \
@@ -680,18 +899,45 @@ print_output() {
       echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#default"
       ;;
     vmess-ws-tls)
-      local ws_path vmess_json
+      local client_port ws_path vmess_json
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
       ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
       vmess_json="$(jq -nc \
         --arg ps "default" \
         --arg add "$addr" \
-        --arg port "$port" \
+        --arg port "$client_port" \
         --arg id "$uuid" \
         --arg host "$sni" \
         --arg path "$ws_path" \
         --arg sni "$sni" \
         '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
       echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+      ;;
+    vmess-ws-nginx)
+      local ws_path vmess_json
+      local client_port
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || echo "443")"
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      vmess_json="$(jq -nc \
+        --arg ps "default" \
+        --arg add "$addr" \
+        --arg port "$client_port" \
+        --arg id "$uuid" \
+        --arg host "$sni" \
+        --arg path "$ws_path" \
+        --arg sni "$sni" \
+        '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni,alpn:"http/1.1"}')"
+      echo "vmess://$(printf "%s" "$vmess_json" | base64 | tr -d '\n')"
+      echo ""
+      echo "Nginx location example:"
+      echo "location ${ws_path} {"
+      echo "    proxy_pass http://127.0.0.1:${port};"
+      echo "    proxy_http_version 1.1;"
+      echo "    proxy_set_header Upgrade \$http_upgrade;"
+      echo "    proxy_set_header Connection \"upgrade\";"
+      echo "    proxy_set_header Host \$host;"
+      echo "    proxy_read_timeout 3600;"
+      echo "}"
       ;;
   esac
 }
@@ -709,6 +955,7 @@ write_systemd
 enable_bbr
 configure_logrotate
 configure_firewall
+configure_nginx_for_vmess_ws_nginx
 install_scripts
 systemctl restart xray
 print_output
