@@ -5,6 +5,7 @@ NO_UI=0
 USE_GUM=0
 STEP_CURRENT=0
 STEP_TOTAL=12
+ACTION_MODE="install"
 
 parse_args() {
   while [ $# -gt 0 ]; do
@@ -12,9 +13,12 @@ parse_args() {
       --no-ui)
         NO_UI=1
         ;;
+      --manage-services)
+        ACTION_MODE="manage-services"
+        ;;
       *)
         echo "Unknown option: $1" >&2
-        echo "Usage: $0 [--no-ui]" >&2
+        echo "Usage: $0 [--no-ui] [--manage-services]" >&2
         exit 1
         ;;
     esac
@@ -357,6 +361,28 @@ list_existing_services() {
   printf "%s\n" "${found[@]}"
 }
 
+list_proxy_services_with_status() {
+  local services=()
+  local svc state enabled
+  while IFS= read -r svc; do
+    [ -n "$svc" ] && services+=("$svc")
+  done < <(list_existing_services)
+
+  if [ "${#services[@]}" -eq 0 ]; then
+    ui_warn "No manageable proxy services detected on this device."
+    return 0
+  fi
+
+  printf "%-28s %-10s %-10s\n" "SERVICE" "ACTIVE" "ENABLED"
+  for svc in "${services[@]}"; do
+    state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
+    [ -z "$state" ] && state="unknown"
+    [ -z "$enabled" ] && enabled="unknown"
+    printf "%-28s %-10s %-10s\n" "$svc" "$state" "$enabled"
+  done
+}
+
 stop_disable_services() {
   local services=("$@")
   local svc
@@ -410,6 +436,112 @@ handle_legacy() {
       ui_success "Legacy configs moved to backup."
     fi
   fi
+}
+
+choose_service() {
+  local prompt="$1"
+  shift
+  local services=("$@")
+  local selected
+
+  if [ "${#services[@]}" -eq 0 ]; then
+    printf "%s\n" ""
+    return 0
+  fi
+
+  selected="$(ui_choose "$prompt" "${services[@]}")"
+  printf "%s\n" "$selected"
+}
+
+manage_proxy_services() {
+  ui_heading "Proxy Service Manager"
+  local services=()
+  local svc action
+
+  while true; do
+    services=()
+    while IFS= read -r svc; do
+      [ -n "$svc" ] && services+=("$svc")
+    done < <(list_existing_services)
+
+    echo ""
+    list_proxy_services_with_status
+    echo ""
+
+    action="$(ui_choose \
+      "Select management action" \
+      "Refresh service list" \
+      "Show service status" \
+      "Start service" \
+      "Stop service" \
+      "Restart service" \
+      "Enable service at boot" \
+      "Disable service at boot" \
+      "Exit manager")"
+
+    case "$action" in
+      "Refresh service list")
+        continue
+        ;;
+      "Show service status")
+        svc="$(choose_service "Select service" "${services[@]}")"
+        [ -z "$svc" ] && continue
+        ui_run "Show status for ${svc}" systemctl status "$svc" --no-pager
+        ;;
+      "Start service")
+        svc="$(choose_service "Select service to start" "${services[@]}")"
+        [ -z "$svc" ] && continue
+        ui_run "Starting ${svc}" systemctl start "$svc"
+        ;;
+      "Stop service")
+        svc="$(choose_service "Select service to stop" "${services[@]}")"
+        [ -z "$svc" ] && continue
+        ui_run "Stopping ${svc}" systemctl stop "$svc"
+        ;;
+      "Restart service")
+        svc="$(choose_service "Select service to restart" "${services[@]}")"
+        [ -z "$svc" ] && continue
+        ui_run "Restarting ${svc}" systemctl restart "$svc"
+        ;;
+      "Enable service at boot")
+        svc="$(choose_service "Select service to enable" "${services[@]}")"
+        [ -z "$svc" ] && continue
+        ui_run "Enabling ${svc}" systemctl enable "$svc"
+        ;;
+      "Disable service at boot")
+        svc="$(choose_service "Select service to disable" "${services[@]}")"
+        [ -z "$svc" ] && continue
+        ui_run "Disabling ${svc}" systemctl disable "$svc"
+        ;;
+      "Exit manager")
+        break
+        ;;
+    esac
+  done
+}
+
+ask_action_mode() {
+  if [ "$ACTION_MODE" = "manage-services" ]; then
+    return 0
+  fi
+
+  local action
+  action="$(ui_choose \
+    "Select operation mode" \
+    "Install or configure Xray" \
+    "Manage existing proxy services")"
+
+  case "$action" in
+    "Install or configure Xray")
+      ACTION_MODE="install"
+      ;;
+    "Manage existing proxy services")
+      ACTION_MODE="manage-services"
+      ;;
+    *)
+      ACTION_MODE="install"
+      ;;
+  esac
 }
 
 ask() {
@@ -1318,11 +1450,21 @@ print_output() {
 
 parse_args "$@"
 require_root
-detect_os
 detect_pkg_mgr
-install_deps
 setup_ui
 ui_banner
+ask_action_mode
+
+if [ "$ACTION_MODE" = "manage-services" ]; then
+  STEP_CURRENT=0
+  STEP_TOTAL=1
+  ui_step "Proxy Service Manager"
+  manage_proxy_services
+  exit 0
+fi
+
+detect_os
+install_deps
 ui_step "Legacy Services Check"
 handle_legacy
 ui_step "Prepare Directories"

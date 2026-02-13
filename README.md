@@ -11,6 +11,7 @@ Language: English | [Chinese (Simplified)](README.zh-CN.md)
   - `VMess + WS + TLS`
   - `VMess + WS behind Nginx` (Xray no TLS, client TLS on Nginx)
   - `VLESS + WS + TLS` (CDN-friendly)
+- Service management mode for existing proxy services on the server
 - Multi-user management scripts
 - Systemd service unit
 - BBR enabled
@@ -37,6 +38,12 @@ Disable enhanced UI and use plain prompts only:
 
 ```bash
 sudo ./install.sh --no-ui
+```
+
+Open service manager directly (list/start/stop/restart/enable/disable):
+
+```bash
+sudo ./install.sh --manage-services
 ```
 
 You will be prompted for:
