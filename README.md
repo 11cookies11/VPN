@@ -1,17 +1,18 @@
-# Xray One-Key (REALITY)
+# Xray One-Key (Multi-Mode)
 
-Privacy-first, auditable deployment scripts for Xray (VLESS + REALITY + xtls-rprx-vision).
+Privacy-first, auditable deployment scripts for Xray.
 
-Language: English | [简体中文](README.zh-CN.md)
+Language: English | [Chinese (Simplified)](README.zh-CN.md)
 
 ## Features
 
-- VLESS + REALITY + xtls-rprx-vision on TCP
+- Selectable deployment mode:
+  - `VLESS + REALITY + xtls-rprx-vision` (TCP)
+  - `VMess + WS + TLS`
 - Multi-user management scripts
 - Systemd service unit
 - BBR enabled
 - Firewall configured (UFW or firewalld)
-- Strong random UUID, shortId, and Reality key pair
 - Safe handling of legacy services and configs
 
 ## Supported OS
@@ -30,19 +31,19 @@ sudo ./install.sh
 
 You will be prompted for:
 
-- Listen port (default 443)
-- ServerName (SNI) for Reality (default www.microsoft.com)
+- Deployment mode (Reality or VMess)
+- Listen port (default `443`)
+- ServerName (SNI)
 - Public address for client links (IP or domain)
 
-If legacy proxy services are detected, the installer will ask to stop/disable them
-and optionally move legacy configs into `/opt/xray/backup-<timestamp>`.
+Additional prompts for `VMess + WS + TLS`:
 
-After install, the script prints:
+- WebSocket path (default `/ws`)
+- TLS certificate file path
+- TLS private key file path
+- If cert/key are missing, installer can generate a self-signed cert
 
-- Public key
-- UUID
-- shortId
-- A ready-to-import vless:// link
+After install, the script prints a ready-to-import link (`vless://` or `vmess://` depending on mode).
 
 ## Management Scripts
 
@@ -71,6 +72,8 @@ Export links:
 ```bash
 sudo /opt/xray/scripts/export_links.sh
 ```
+
+All scripts auto-detect current mode and generate matching links.
 
 ## Files
 
