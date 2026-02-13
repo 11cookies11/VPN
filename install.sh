@@ -1,9 +1,270 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+NO_UI=0
+USE_GUM=0
+STEP_CURRENT=0
+STEP_TOTAL=12
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-ui)
+        NO_UI=1
+        ;;
+      *)
+        echo "Unknown option: $1" >&2
+        echo "Usage: $0 [--no-ui]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+ui_info() {
+  local msg="$1"
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --foreground 212 "INFO  ${msg}"
+  else
+    echo "[INFO] ${msg}"
+  fi
+}
+
+ui_warn() {
+  local msg="$1"
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --foreground 214 "WARN  ${msg}"
+  else
+    echo "[WARN] ${msg}"
+  fi
+}
+
+ui_success() {
+  local msg="$1"
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --foreground 42 "OK    ${msg}"
+  else
+    echo "[ OK ] ${msg}"
+  fi
+}
+
+ui_error() {
+  local msg="$1"
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --foreground 196 "ERROR ${msg}" >&2
+  else
+    echo "[ERR ] ${msg}" >&2
+  fi
+}
+
+ui_heading() {
+  local msg="$1"
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --bold --foreground 39 "${msg}"
+  else
+    echo ""
+    echo "== ${msg} =="
+  fi
+}
+
+ui_step() {
+  local msg="$1"
+  STEP_CURRENT=$((STEP_CURRENT + 1))
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --bold --foreground 81 "[${STEP_CURRENT}/${STEP_TOTAL}] ${msg}"
+  else
+    echo ""
+    echo "[${STEP_CURRENT}/${STEP_TOTAL}] ${msg}"
+  fi
+}
+
+ui_banner() {
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum style --border rounded --margin "1 0" --padding "1 2" --foreground 45 --border-foreground 45 \
+      "Xray One-Key Installer" \
+      "Interactive mode: gum"
+  else
+    echo "Xray One-Key Installer"
+  fi
+}
+
+ui_run() {
+  local title="$1"
+  shift
+
+  if [ "$USE_GUM" -eq 1 ]; then
+    local log_file
+    log_file="$(mktemp)"
+    if gum spin --spinner dot --title "$title" -- "$@" >"$log_file" 2>&1; then
+      rm -f "$log_file"
+      return 0
+    fi
+    ui_error "${title} failed"
+    cat "$log_file" >&2
+    rm -f "$log_file"
+    return 1
+  fi
+
+  ui_info "$title"
+  "$@"
+}
+
+ui_input() {
+  local prompt="$1"
+  local default="$2"
+  local input=""
+  if [ "$USE_GUM" -eq 1 ]; then
+    input="$(gum input --prompt "${prompt}: " --value "$default")"
+  else
+    read -r -p "${prompt} [${default}]: " input
+  fi
+
+  if [ -z "$input" ]; then
+    printf "%s\n" "$default"
+  else
+    printf "%s\n" "$input"
+  fi
+}
+
+ui_confirm() {
+  local prompt="$1"
+  local default="${2:-N}"
+
+  if [ "$USE_GUM" -eq 1 ]; then
+    if [ "$default" = "Y" ]; then
+      gum confirm --default=true "$prompt"
+    else
+      gum confirm "$prompt"
+    fi
+    return $?
+  fi
+
+  local input
+  if [ "$default" = "Y" ]; then
+    read -r -p "${prompt} (Y/n): " input
+    case "${input:-Y}" in
+      y|Y) return 0 ;;
+      *) return 1 ;;
+    esac
+  else
+    read -r -p "${prompt} (y/N): " input
+    case "${input:-N}" in
+      y|Y) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+ui_choose() {
+  local prompt="$1"
+  shift
+
+  if [ "$USE_GUM" -eq 1 ]; then
+    gum choose --header "$prompt" "$@"
+    return 0
+  fi
+
+  local idx=1
+  local opt
+  echo "$prompt"
+  for opt in "$@"; do
+    echo "  ${idx}) ${opt}"
+    idx=$((idx + 1))
+  done
+
+  local choice
+  while true; do
+    read -r -p "Select [1]: " choice
+    choice="${choice:-1}"
+    if [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le $# ] 2>/dev/null; then
+      eval "printf '%s\n' \"\${$choice}\""
+      return 0
+    fi
+    echo "Invalid selection."
+  done
+}
+
+install_gum() {
+  local arch raw_arch version version_plain url tmp
+  raw_arch="$(uname -m)"
+  case "$raw_arch" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *)
+      ui_warn "Unsupported architecture for auto-installing gum: ${raw_arch}"
+      return 1
+      ;;
+  esac
+
+  version="$(curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest | jq -r '.tag_name' || true)"
+  if [ -z "$version" ] || [ "$version" = "null" ]; then
+    ui_warn "Failed to detect gum latest release."
+    return 1
+  fi
+  version_plain="${version#v}"
+
+  tmp="$(mktemp -d)"
+  case "$PKG_MGR" in
+    apt)
+      case "$arch" in
+        x86_64) url="https://github.com/charmbracelet/gum/releases/download/${version}/gum_${version_plain}_amd64.deb" ;;
+        arm64) url="https://github.com/charmbracelet/gum/releases/download/${version}/gum_${version_plain}_arm64.deb" ;;
+      esac
+      wget -q -O "${tmp}/gum.deb" "$url"
+      dpkg -i "${tmp}/gum.deb" >/dev/null 2>&1 || apt-get install -f -y >/dev/null 2>&1
+      ;;
+    dnf)
+      case "$arch" in
+        x86_64) url="https://github.com/charmbracelet/gum/releases/download/${version}/gum_${version_plain}_x86_64.rpm" ;;
+        arm64) url="https://github.com/charmbracelet/gum/releases/download/${version}/gum_${version_plain}_arm64.rpm" ;;
+      esac
+      wget -q -O "${tmp}/gum.rpm" "$url"
+      dnf install -y "${tmp}/gum.rpm" >/dev/null 2>&1
+      ;;
+    yum)
+      case "$arch" in
+        x86_64) url="https://github.com/charmbracelet/gum/releases/download/${version}/gum_${version_plain}_x86_64.rpm" ;;
+        arm64) url="https://github.com/charmbracelet/gum/releases/download/${version}/gum_${version_plain}_arm64.rpm" ;;
+      esac
+      wget -q -O "${tmp}/gum.rpm" "$url"
+      yum localinstall -y "${tmp}/gum.rpm" >/dev/null 2>&1
+      ;;
+  esac
+
+  rm -rf "$tmp"
+  command -v gum >/dev/null 2>&1
+}
+
+setup_ui() {
+  if [ "$NO_UI" -eq 1 ]; then
+    USE_GUM=0
+    return 0
+  fi
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    USE_GUM=0
+    return 0
+  fi
+
+  if command -v gum >/dev/null 2>&1; then
+    USE_GUM=1
+    return 0
+  fi
+
+  ui_info "gum not found, attempting auto-install..."
+  if install_gum; then
+    USE_GUM=1
+    ui_success "gum installed. Enhanced interactive UI enabled."
+  else
+    USE_GUM=0
+    ui_warn "gum install failed; falling back to plain prompts."
+  fi
+}
+
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    echo "Must run as root" >&2
+    ui_error "Must run as root"
     exit 1
   fi
 }
@@ -27,53 +288,57 @@ detect_pkg_mgr() {
   elif command -v yum >/dev/null 2>&1; then
     PKG_MGR="yum"
   else
-    echo "No supported package manager found" >&2
+    ui_error "No supported package manager found"
     exit 1
   fi
 }
 
 install_deps() {
+  ui_heading "Install Dependencies"
   case "$PKG_MGR" in
     apt)
-      apt-get update -y
-      apt-get install -y curl wget unzip jq uuid-runtime openssl ufw logrotate
+      ui_run "Updating apt package index" apt-get update -y
+      ui_run "Installing dependency packages" apt-get install -y curl wget unzip jq uuid-runtime openssl ufw logrotate
       ;;
     dnf)
-      dnf makecache -y
-      dnf install -y curl wget unzip jq util-linux openssl firewalld logrotate
+      ui_run "Refreshing dnf package metadata" dnf makecache -y
+      ui_run "Installing dependency packages" dnf install -y curl wget unzip jq util-linux openssl firewalld logrotate
       ;;
     yum)
-      yum makecache -y
-      yum install -y curl wget unzip jq util-linux openssl firewalld logrotate
+      ui_run "Refreshing yum package metadata" yum makecache -y
+      ui_run "Installing dependency packages" yum install -y curl wget unzip jq util-linux openssl firewalld logrotate
       ;;
   esac
 }
 
 install_xray() {
+  ui_heading "Install Xray Core"
   if command -v xray >/dev/null 2>&1; then
+    ui_info "xray already exists, skipping install."
     return 0
   fi
 
   local url
   url="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.assets[] | select(.name|test("linux-64.zip$")) | .browser_download_url' | head -n1)"
   if [ -z "$url" ] || [ "$url" = "null" ]; then
-    echo "Failed to fetch Xray release URL" >&2
+    ui_error "Failed to fetch Xray release URL"
     exit 1
   fi
 
   rm -rf /tmp/xray-install
   mkdir -p /tmp/xray-install
-  wget -O /tmp/xray-install/xray.zip "$url"
-  unzip -o /tmp/xray-install/xray.zip -d /tmp/xray-install
-  install -m 0755 /tmp/xray-install/xray /usr/local/bin/xray
+  ui_run "Downloading Xray release" wget -O /tmp/xray-install/xray.zip "$url"
+  ui_run "Extracting Xray release archive" unzip -o /tmp/xray-install/xray.zip -d /tmp/xray-install
+  ui_run "Installing Xray binary" install -m 0755 /tmp/xray-install/xray /usr/local/bin/xray
   mkdir -p /usr/local/share/xray
   if [ -f /tmp/xray-install/geoip.dat ]; then
-    install -m 0644 /tmp/xray-install/geoip.dat /usr/local/share/xray/geoip.dat
+    ui_run "Installing geoip.dat" install -m 0644 /tmp/xray-install/geoip.dat /usr/local/share/xray/geoip.dat
   fi
   if [ -f /tmp/xray-install/geosite.dat ]; then
-    install -m 0644 /tmp/xray-install/geosite.dat /usr/local/share/xray/geosite.dat
+    ui_run "Installing geosite.dat" install -m 0644 /tmp/xray-install/geosite.dat /usr/local/share/xray/geosite.dat
   fi
   rm -rf /tmp/xray-install
+  ui_success "Xray core installed."
 }
 
 ensure_dirs() {
@@ -123,76 +388,69 @@ backup_legacy_paths() {
 }
 
 handle_legacy() {
+  ui_heading "Legacy Services Check"
   local services=()
   while IFS= read -r line; do
     [ -n "$line" ] && services+=("$line")
   done < <(list_existing_services)
 
   if [ "${#services[@]}" -gt 0 ]; then
-    echo "Detected existing proxy services:"
+    ui_warn "Detected existing proxy services:"
     printf " - %s\n" "${services[@]}"
-    read -r -p "Stop and disable these services? (y/N): " ans
-    case "${ans:-N}" in
-      y|Y) stop_disable_services "${services[@]}" ;;
-      *) ;;
-    esac
+    if ui_confirm "Stop and disable these services?" "N"; then
+      stop_disable_services "${services[@]}"
+      ui_success "Legacy services stopped/disabled."
+    fi
   fi
 
   if [ -d /etc/xray ] || [ -d /etc/v2ray ] || [ -d /usr/local/etc/xray ] || [ -d /usr/local/etc/v2ray ] || [ -d /opt/v2ray ]; then
-    echo "Detected legacy config directories."
-    read -r -p "Move legacy configs to /opt/xray/backup-<timestamp>? (y/N): " ans
-    case "${ans:-N}" in
-      y|Y) backup_legacy_paths ;;
-      *) ;;
-    esac
+    ui_warn "Detected legacy config directories."
+    if ui_confirm "Move legacy configs to /opt/xray/backup-<timestamp>?" "N"; then
+      backup_legacy_paths
+      ui_success "Legacy configs moved to backup."
+    fi
   fi
 }
 
 ask() {
   local prompt="$1"
   local default="$2"
-  local input
-  read -r -p "$prompt [$default]: " input
-  if [ -z "$input" ]; then
-    echo "$default"
-  else
-    echo "$input"
-  fi
+  ui_input "$prompt" "$default"
 }
 
 ask_protocol() {
   local choice
-  echo "Select deployment mode:"
-  echo "  1) VLESS + REALITY (TCP)"
-  echo "  2) VMess + WS + TLS"
-  echo "  3) VMess + WS behind Nginx (no TLS on Xray, client TLS on 443)"
+  choice="$(ui_choose \
+    "Select deployment mode" \
+    "VLESS + REALITY (TCP)" \
+    "VMess + WS + TLS" \
+    "VMess + WS behind Nginx (no TLS on Xray, client TLS on 443)" \
+    "VLESS + WS + TLS (CDN-friendly)")"
 
-  while true; do
-    read -r -p "Mode [1]: " choice
-    case "${choice:-1}" in
-      1)
-        PROTOCOL="vless-reality"
-        break
-        ;;
-      2)
-        PROTOCOL="vmess-ws-tls"
-        break
-        ;;
-      3)
-        PROTOCOL="vmess-ws-nginx"
-        break
-        ;;
-      *)
-        echo "Invalid option, choose 1, 2 or 3."
-        ;;
-    esac
-  done
+  case "$choice" in
+    "VLESS + REALITY (TCP)")
+      PROTOCOL="vless-reality"
+      ;;
+    "VMess + WS + TLS")
+      PROTOCOL="vmess-ws-tls"
+      ;;
+    "VMess + WS behind Nginx (no TLS on Xray, client TLS on 443)")
+      PROTOCOL="vmess-ws-nginx"
+      ;;
+    "VLESS + WS + TLS (CDN-friendly)")
+      PROTOCOL="vless-ws-tls"
+      ;;
+    *)
+      ui_error "Invalid deployment mode"
+      exit 1
+      ;;
+  esac
 }
 
 gen_reality_keys() {
   if [ ! -f /opt/xray/keys/private.key ] || [ ! -f /opt/xray/keys/public.key ]; then
     if ! /usr/local/bin/xray x25519 >/dev/null 2>&1; then
-      echo "This Xray build does not support x25519 (required by REALITY)." >&2
+      ui_error "This Xray build does not support x25519 (required by REALITY)."
       exit 1
     fi
 
@@ -202,7 +460,7 @@ gen_reality_keys() {
     priv="$(printf "%s\n" "$out" | awk -F':' 'tolower($0) ~ /private[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
     pub="$(printf "%s\n" "$out" | awk -F':' 'tolower($1) ~ /public[[:space:]]*key/ || tolower($1) ~ /password/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
     if [ -z "$priv" ] || [ -z "$pub" ]; then
-      echo "Failed to generate X25519 keys" >&2
+      ui_error "Failed to generate X25519 keys"
       echo "xray x25519 output:" >&2
       printf "%s\n" "$out" >&2
       exit 1
@@ -321,16 +579,12 @@ write_vmess_ws_tls_config() {
   key_file="$(ask "TLS private key file" "/opt/xray/keys/privkey.pem")"
 
   if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
-    read -r -p "TLS files not found. Generate self-signed cert now? (Y/n): " gen_ans
-    case "${gen_ans:-Y}" in
-      n|N)
-        echo "VMess+WS+TLS requires certificate and key files." >&2
-        exit 1
-        ;;
-      *)
-        generate_self_signed_cert "$sni" "$cert_file" "$key_file"
-        ;;
-    esac
+    if ui_confirm "TLS files not found. Generate self-signed cert now?" "Y"; then
+      generate_self_signed_cert "$sni" "$cert_file" "$key_file"
+    else
+      ui_error "VMess+WS+TLS requires certificate and key files."
+      exit 1
+    fi
   fi
 
   echo "$PROTOCOL" > /opt/xray/keys/protocol
@@ -365,6 +619,90 @@ write_vmess_ws_tls_config() {
             "email": "default"
           }
         ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "$cert_file",
+              "keyFile": "$key_file"
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "$ws_path",
+          "headers": {
+            "Host": "$sni"
+          }
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+}
+
+write_vless_ws_tls_config() {
+  local cfg="$1"
+  local port="$2"
+  local sni="$3"
+  local ws_path="$4"
+
+  ensure_uuid
+
+  local cert_file key_file
+  cert_file="$(ask "TLS certificate file" "/opt/xray/keys/fullchain.pem")"
+  key_file="$(ask "TLS private key file" "/opt/xray/keys/privkey.pem")"
+
+  if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+    if ui_confirm "TLS files not found. Generate self-signed cert now?" "Y"; then
+      generate_self_signed_cert "$sni" "$cert_file" "$key_file"
+    else
+      ui_error "VLESS+WS+TLS requires certificate and key files."
+      exit 1
+    fi
+  fi
+
+  echo "$PROTOCOL" > /opt/xray/keys/protocol
+  echo "$port" > /opt/xray/keys/port
+  echo "$port" > /opt/xray/keys/client_port
+  echo "$sni" > /opt/xray/keys/server_name
+  echo "$ws_path" > /opt/xray/keys/ws_path
+  echo "$cert_file" > /opt/xray/keys/tls_cert
+  echo "$key_file" > /opt/xray/keys/tls_key
+
+  local uuid
+  uuid="$(cat /opt/xray/keys/uuid)"
+
+  cat > "$cfg" <<EOF
+{
+  "log": {
+    "access": "/opt/xray/logs/access.log",
+    "error": "/opt/xray/logs/error.log",
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vless-ws-tls-in",
+      "listen": "0.0.0.0",
+      "port": $port,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "email": "default"
+          }
+        ],
+        "decryption": "none"
       },
       "streamSettings": {
         "network": "ws",
@@ -460,14 +798,14 @@ EOF
 }
 
 write_config() {
+  ui_heading "Configure Xray"
   local cfg=/opt/xray/config/config.json
 
   if [ -f "$cfg" ]; then
-    read -r -p "Config exists. Overwrite? (y/N): " ans
-    case "${ans:-N}" in
-      y|Y) ;;
-      *) return 0 ;;
-    esac
+    if ! ui_confirm "Config already exists. Overwrite?" "N"; then
+      ui_warn "Keeping existing config."
+      return 0
+    fi
   fi
 
   ask_protocol
@@ -476,7 +814,7 @@ write_config() {
   port="$(ask "Listen port" "443")"
   if command -v ss >/dev/null 2>&1; then
     while ss -lntp 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"; do
-      echo "Port $port is already in use."
+      ui_warn "Port ${port} is already in use."
       port="$(ask "Listen port" "443")"
     done
   fi
@@ -496,16 +834,23 @@ write_config() {
       ws_path="$(ask "WebSocket path" "/ws")"
       write_vmess_ws_nginx_config "$cfg" "$port" "$sni" "$ws_path"
       ;;
+    vless-ws-tls)
+      local ws_path
+      ws_path="$(ask "WebSocket path" "/ws")"
+      write_vless_ws_tls_config "$cfg" "$port" "$sni" "$ws_path"
+      ;;
     *)
-      echo "Unsupported protocol: $PROTOCOL" >&2
+      ui_error "Unsupported protocol: $PROTOCOL"
       exit 1
       ;;
   esac
 
   jq -e . "$cfg" >/dev/null
+  ui_success "Config written: ${cfg}"
 }
 
 configure_server_addr() {
+  ui_heading "Configure Link Address"
   local addr_file=/opt/xray/keys/server_addr
   local auto_ip=""
   auto_ip="$(curl -s https://api.ipify.org || true)"
@@ -515,6 +860,7 @@ configure_server_addr() {
 }
 
 write_systemd() {
+  ui_heading "Install Systemd Service"
   cat > /etc/systemd/system/xray.service <<'EOF'
 [Unit]
 Description=Xray Service
@@ -531,19 +877,21 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable xray
+  ui_run "Reloading systemd daemon" systemctl daemon-reload
+  ui_run "Enabling xray service" systemctl enable xray
 }
 
 enable_bbr() {
+  ui_heading "Tune Kernel (BBR)"
   cat > /etc/sysctl.d/99-xray-bbr.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-  sysctl --system >/dev/null
+  ui_run "Applying sysctl settings" sysctl --system
 }
 
 configure_logrotate() {
+  ui_heading "Configure Log Rotation"
   cat > /etc/logrotate.d/xray <<'EOF'
 /opt/xray/logs/access.log /opt/xray/logs/error.log {
   daily
@@ -554,9 +902,11 @@ configure_logrotate() {
   copytruncate
 }
 EOF
+  ui_success "Logrotate rule installed."
 }
 
 configure_firewall() {
+  ui_heading "Configure Firewall"
   local protocol fw_port
   protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
   fw_port="$(cat /opt/xray/keys/port)"
@@ -565,20 +915,21 @@ configure_firewall() {
   fi
 
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow OpenSSH >/dev/null
-    ufw allow "${fw_port}/tcp" >/dev/null
-    ufw default deny incoming >/dev/null
-    ufw --force enable >/dev/null
+    ui_run "Allowing SSH in UFW" ufw allow OpenSSH
+    ui_run "Allowing ${fw_port}/tcp in UFW" ufw allow "${fw_port}/tcp"
+    ui_run "Setting UFW default deny incoming" ufw default deny incoming
+    ui_run "Enabling UFW" ufw --force enable
   elif command -v firewall-cmd >/dev/null 2>&1; then
-    systemctl enable --now firewalld >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-service=ssh >/dev/null
-    firewall-cmd --permanent --add-port="${fw_port}/tcp" >/dev/null
-    firewall-cmd --permanent --set-default-zone=public >/dev/null
-    firewall-cmd --reload >/dev/null
+    ui_run "Ensuring firewalld service is running" systemctl enable --now firewalld
+    ui_run "Allowing SSH in firewalld" firewall-cmd --permanent --add-service=ssh
+    ui_run "Allowing ${fw_port}/tcp in firewalld" firewall-cmd --permanent --add-port="${fw_port}/tcp"
+    ui_run "Setting firewalld default zone to public" firewall-cmd --permanent --set-default-zone=public
+    ui_run "Reloading firewalld rules" firewall-cmd --reload
   fi
 }
 
 configure_nginx_for_vmess_ws_nginx() {
+  ui_heading "Configure Nginx (Optional)"
   local protocol
   protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
   if [ "$protocol" != "vmess-ws-nginx" ]; then
@@ -586,15 +937,13 @@ configure_nginx_for_vmess_ws_nginx() {
   fi
 
   if ! command -v nginx >/dev/null 2>&1; then
-    echo "Nginx not found, skip auto nginx config."
+    ui_warn "Nginx not found, skip auto Nginx config."
     return 0
   fi
 
-  read -r -p "Auto configure Nginx reverse proxy now? (Y/n): " ans
-  case "${ans:-Y}" in
-    n|N) return 0 ;;
-    *) ;;
-  esac
+  if ! ui_confirm "Auto configure Nginx reverse proxy now?" "Y"; then
+    return 0
+  fi
 
   local sni ws_path backend_port client_port
   sni="$(cat /opt/xray/keys/server_name)"
@@ -674,9 +1023,9 @@ EOF
 
   if nginx -t >/dev/null 2>&1; then
     systemctl reload nginx
-    echo "Nginx config applied: ${conf_file}"
+    ui_success "Nginx config applied: ${conf_file}"
   else
-    echo "Nginx config test failed. Please check: ${conf_file}" >&2
+    ui_error "Nginx config test failed. Please check: ${conf_file}"
     return 1
   fi
 }
@@ -706,6 +1055,11 @@ case "$protocol" in
   vless-reality)
     jq --arg id "$uuid" --arg email "$username" \
       '.inbounds[0].settings.clients += [{"id":$id,"flow":"xtls-rprx-vision","email":$email}]' \
+      "$config" > "$tmp"
+    ;;
+  vless-ws-tls)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"email":$email}]' \
       "$config" > "$tmp"
     ;;
   vmess-ws-tls)
@@ -741,6 +1095,12 @@ case "$protocol" in
     pub="$(cat /opt/xray/keys/public.key)"
     shortid="$(cat /opt/xray/keys/shortid)"
     echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
+    ;;
+  vless-ws-tls)
+    client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
+    ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+    ws_path_enc="${ws_path//\//%2F}"
+    echo "vless://${uuid}@${addr}:${client_port}?encryption=none&security=tls&sni=${sni}&type=ws&host=${sni}&path=${ws_path_enc}#${username}"
     ;;
   vmess-ws-tls)
     client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
@@ -837,6 +1197,12 @@ jq -r '.inbounds[0].settings.clients[] | "\(.email)\t\(.id)"' /opt/xray/config/c
       shortid="$(cat /opt/xray/keys/shortid)"
       echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${email}"
       ;;
+    vless-ws-tls)
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      ws_path_enc="${ws_path//\//%2F}"
+      echo "vless://${uuid}@${addr}:${client_port}?encryption=none&security=tls&sni=${sni}&type=ws&host=${sni}&path=${ws_path_enc}#${email}"
+      ;;
     vmess-ws-tls)
       client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
       ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
@@ -876,6 +1242,7 @@ EOF
 }
 
 print_output() {
+  ui_heading "Connection Output"
   local protocol uuid addr sni port
   protocol="$(cat /opt/xray/keys/protocol 2>/dev/null || echo "vless-reality")"
   uuid="$(cat /opt/xray/keys/uuid)"
@@ -886,8 +1253,8 @@ print_output() {
     addr="YOUR_SERVER_IP"
   fi
 
-  echo "Protocol: $protocol"
-  echo "UUID: $uuid"
+  ui_info "Protocol: $protocol"
+  ui_info "UUID: $uuid"
 
   case "$protocol" in
     vless-reality)
@@ -897,6 +1264,13 @@ print_output() {
       echo "PublicKey: $pub"
       echo "shortId: $shortid"
       echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#default"
+      ;;
+    vless-ws-tls)
+      local client_port ws_path ws_path_enc
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      ws_path_enc="${ws_path//\//%2F}"
+      echo "vless://${uuid}@${addr}:${client_port}?encryption=none&security=tls&sni=${sni}&type=ws&host=${sni}&path=${ws_path_enc}#default"
       ;;
     vmess-ws-tls)
       local client_port ws_path vmess_json
@@ -942,20 +1316,36 @@ print_output() {
   esac
 }
 
+parse_args "$@"
 require_root
 detect_os
 detect_pkg_mgr
 install_deps
+setup_ui
+ui_banner
+ui_step "Legacy Services Check"
 handle_legacy
+ui_step "Prepare Directories"
 ensure_dirs
+ui_step "Install Xray Core"
 install_xray
+ui_step "Configure Xray"
 write_config
+ui_step "Configure Link Address"
 configure_server_addr
+ui_step "Install Systemd Service"
 write_systemd
+ui_step "Tune Kernel (BBR)"
 enable_bbr
+ui_step "Configure Log Rotation"
 configure_logrotate
+ui_step "Configure Firewall"
 configure_firewall
+ui_step "Configure Nginx (Optional)"
 configure_nginx_for_vmess_ws_nginx
+ui_step "Install Management Scripts"
 install_scripts
-systemctl restart xray
+ui_step "Restart Service"
+ui_run "Restarting xray service" systemctl restart xray
+ui_success "xray service restarted."
 print_output

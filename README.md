@@ -10,11 +10,14 @@ Language: English | [Chinese (Simplified)](README.zh-CN.md)
   - `VLESS + REALITY + xtls-rprx-vision` (TCP)
   - `VMess + WS + TLS`
   - `VMess + WS behind Nginx` (Xray no TLS, client TLS on Nginx)
+  - `VLESS + WS + TLS` (CDN-friendly)
 - Multi-user management scripts
 - Systemd service unit
 - BBR enabled
 - Firewall configured (UFW or firewalld)
 - Safe handling of legacy services and configs
+- Interactive installer UI with `gum` (auto-install; fallback to plain prompts)
+- Step progress and spinner feedback for long-running operations
 
 ## Supported OS
 
@@ -30,6 +33,12 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+Disable enhanced UI and use plain prompts only:
+
+```bash
+sudo ./install.sh --no-ui
+```
+
 You will be prompted for:
 
 - Deployment mode (Reality or VMess)
@@ -38,6 +47,13 @@ You will be prompted for:
 - Public address for client links (IP or domain)
 
 Additional prompts for `VMess + WS + TLS`:
+
+- WebSocket path (default `/ws`)
+- TLS certificate file path
+- TLS private key file path
+- If cert/key are missing, installer can generate a self-signed cert
+
+Additional prompts for `VLESS + WS + TLS`:
 
 - WebSocket path (default `/ws`)
 - TLS certificate file path

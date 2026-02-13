@@ -23,6 +23,11 @@ case "$protocol" in
       '.inbounds[0].settings.clients += [{"id":$id,"flow":"xtls-rprx-vision","email":$email}]' \
       "$config" > "$tmp"
     ;;
+  vless-ws-tls)
+    jq --arg id "$uuid" --arg email "$username" \
+      '.inbounds[0].settings.clients += [{"id":$id,"email":$email}]' \
+      "$config" > "$tmp"
+    ;;
   vmess-ws-tls)
     jq --arg id "$uuid" --arg email "$username" \
       '.inbounds[0].settings.clients += [{"id":$id,"alterId":0,"email":$email}]' \
@@ -56,6 +61,12 @@ case "$protocol" in
     pub="$(cat /opt/xray/keys/public.key)"
     shortid="$(cat /opt/xray/keys/shortid)"
     echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${username}"
+    ;;
+  vless-ws-tls)
+    client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
+    ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+    ws_path_enc="${ws_path//\//%2F}"
+    echo "vless://${uuid}@${addr}:${client_port}?encryption=none&security=tls&sni=${sni}&type=ws&host=${sni}&path=${ws_path_enc}#${username}"
     ;;
   vmess-ws-tls)
     client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"

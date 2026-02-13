@@ -21,6 +21,12 @@ jq -r '.inbounds[0].settings.clients[] | "\(.email)\t\(.id)"' /opt/xray/config/c
       shortid="$(cat /opt/xray/keys/shortid)"
       echo "vless://${uuid}@${addr}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${shortid}&type=tcp&flow=xtls-rprx-vision#${email}"
       ;;
+    vless-ws-tls)
+      client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
+      ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
+      ws_path_enc="${ws_path//\//%2F}"
+      echo "vless://${uuid}@${addr}:${client_port}?encryption=none&security=tls&sni=${sni}&type=ws&host=${sni}&path=${ws_path_enc}#${email}"
+      ;;
     vmess-ws-tls)
       client_port="$(cat /opt/xray/keys/client_port 2>/dev/null || cat /opt/xray/keys/port)"
       ws_path="$(cat /opt/xray/keys/ws_path 2>/dev/null || echo "/ws")"
